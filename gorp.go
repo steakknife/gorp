@@ -787,84 +787,110 @@ func (m *DbMap) CreateTablesIfNotExists() error {
 	return m.createTables(true)
 }
 
-func (m *DbMap) createTables(ifNotExists bool) error {
-	var err error
-	for i := range m.tables {
-		table := m.tables[i]
+// CreateTables iterates through TableMaps registered to this DbMap and
+// outputs "create table" statements against the database for each.
+//
+// This is particularly useful for exporting sql statements.
+func (m *DbMap) CreateTablesStatements() string {
+	return m.createTablesStatements(false)
+}
 
-		s := bytes.Buffer{}
+// CreateTablesIfNotExistsStatements is similar to CreateTablesStatements, but starts
+// each statement with "create table if not exists" so that existing
+// tables do not raise errors
+func (m *DbMap) CreateTablesIfNotExistsStatements() string {
+	return m.createTablesStatements(true)
+}
 
-		if strings.TrimSpace(table.SchemaName) != "" {
-			schemaCreate := "create schema"
-			if ifNotExists {
-				schemaCreate += " if not exists"
-			}
+func (t *TableMap) createTable(ifNotExists bool, dialect *Dialect) string {
+	s := bytes.Buffer{}
 
-			s.WriteString(fmt.Sprintf("%s %s;", schemaCreate, table.SchemaName))
-		}
-
-		create := "create table"
+	if strings.TrimSpace(t.SchemaName) != "" {
+		schemaCreate := "create schema"
 		if ifNotExists {
-			create += " if not exists"
+			schemaCreate += " if not exists"
 		}
 
-		s.WriteString(fmt.Sprintf("%s %s (", create, m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
-		x := 0
-		for _, col := range table.Columns {
-			if !col.Transient {
-				if x > 0 {
-					s.WriteString(", ")
-				}
-				stype := m.Dialect.ToSqlType(col.gotype, col.MaxSize, col.isAutoIncr)
-				s.WriteString(fmt.Sprintf("%s %s", m.Dialect.QuoteField(col.ColumnName), stype))
+		s.WriteString(fmt.Sprintf("%s %s;", schemaCreate, t.SchemaName))
+	}
 
-				if col.isPK || col.isNotNull {
-					s.WriteString(" not null")
-				}
-				if col.isPK && len(table.keys) == 1 {
-					s.WriteString(" primary key")
-				}
-				if col.Unique {
-					s.WriteString(" unique")
-				}
-				if col.isAutoIncr {
-					s.WriteString(fmt.Sprintf(" %s", m.Dialect.AutoIncrStr()))
-				}
+	create := "create table"
+	if ifNotExists {
+		create += " if not exists"
+	}
 
-				x++
+	s.WriteString(fmt.Sprintf("%s %s (", create, (*dialect).QuotedTableForQuery(t.SchemaName, t.TableName)))
+	x := 0
+	for _, col := range t.Columns {
+		if col.Transient {
+			continue
+		}
+		if x > 0 {
+			s.WriteString(", ")
+		}
+		stype := (*dialect).ToSqlType(col.gotype, col.MaxSize, col.isAutoIncr)
+		s.WriteString(fmt.Sprintf("%s %s", (*dialect).QuoteField(col.ColumnName), stype))
+
+		if col.isPK || col.isNotNull {
+			s.WriteString(" not null")
+		}
+		if col.isPK && len(t.keys) == 1 {
+			s.WriteString(" primary key")
+		}
+		if col.Unique {
+			s.WriteString(" unique")
+		}
+		if col.isAutoIncr {
+			s.WriteString(fmt.Sprintf(" %s", (*dialect).AutoIncrStr()))
+		}
+		s.WriteString("\n")
+		x++
+	}
+	if len(t.keys) > 1 {
+		s.WriteString(", primary key (")
+		for x := range t.keys {
+			if x > 0 {
+				s.WriteString(", ")
 			}
+			s.WriteString((*dialect).QuoteField(t.keys[x].ColumnName))
 		}
-		if len(table.keys) > 1 {
-			s.WriteString(", primary key (")
-			for x := range table.keys {
-				if x > 0 {
+		s.WriteString(")")
+	}
+	if len(t.uniqueTogether) > 0 {
+		for _, columns := range t.uniqueTogether {
+			s.WriteString(", unique (")
+			for i, column := range columns {
+				if i > 0 {
 					s.WriteString(", ")
 				}
-				s.WriteString(m.Dialect.QuoteField(table.keys[x].ColumnName))
+				s.WriteString((*dialect).QuoteField(column))
 			}
 			s.WriteString(")")
 		}
-		if len(table.uniqueTogether) > 0 {
-			for _, columns := range table.uniqueTogether {
-				s.WriteString(", unique (")
-				for i, column := range columns {
-					if i > 0 {
-						s.WriteString(", ")
-					}
-					s.WriteString(m.Dialect.QuoteField(column))
-				}
-				s.WriteString(")")
-			}
-		}
-		s.WriteString(") ")
-		s.WriteString(m.Dialect.CreateTableSuffix())
-		s.WriteString(m.Dialect.QuerySuffix())
-		_, err = m.Exec(s.String())
+	}
+	s.WriteString(") ")
+	s.WriteString((*dialect).CreateTableSuffix())
+	s.WriteString((*dialect).QuerySuffix())
+
+	return s.String()
+}
+
+func (m *DbMap) createTablesStatements(ifNotExists bool) (r string) {
+	r = ""
+	for _, table := range m.tables {
+		r += table.createTable(ifNotExists, &m.Dialect) + "\n"
+	}
+	return
+}
+
+func (m *DbMap) createTables(ifNotExists bool) (err error) {
+	for _, table := range m.tables {
+		_, err = m.Exec(table.createTable(ifNotExists, &m.Dialect))
 		if err != nil {
-			break
+			return
 		}
 	}
-	return err
+	return
 }
 
 // DropTable drops an individual table.  Will throw an error
